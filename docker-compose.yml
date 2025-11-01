@@ -1,0 +1,208 @@
+version: '3.8'
+
+services:
+  # Nginx Web Server
+  nginx:
+    image: nginx:alpine
+    container_name: docvault_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./storage/documents:/var/www/html/storage/documents
+      - backend_public:/var/www/html/public:ro
+      - frontend_dist:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - docvault_network
+    restart: unless-stopped
+
+  # PHP Backend Application
+  backend:
+    image: ghcr.io/private-doc-vault/docvault-backend:v1.0.0
+    container_name: docvault_backend
+    working_dir: /var/www/html
+    volumes:
+      - ./storage:/var/www/html/storage
+      - backend_public:/var/www/html/public
+    environment:
+      - APP_ENV=${APP_ENV:-prod}
+      - APP_SECRET=${APP_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MEILISEARCH_HOST=${MEILISEARCH_HOST}
+      - MEILISEARCH_KEY=${MEILISEARCH_KEY}
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - JWT_PASSPHRASE=${JWT_PASSPHRASE}
+      - DOCUMENTS_STORAGE_PATH=/var/www/html/storage/documents
+      - TEMP_STORAGE_PATH=/var/www/html/storage/temp
+      - OCR_WEBHOOK_SECRET=${OCR_WEBHOOK_SECRET}
+    depends_on:
+      - postgres
+      - redis
+      - meilisearch
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "php-fpm -t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Queue Worker for Background Processing
+  queue-worker:
+    image: ghcr.io/private-doc-vault/docvault-backend:v1.0.0
+    container_name: docvault_queue_worker
+    working_dir: /var/www/html
+    volumes:
+      - ./storage:/var/www/html/storage
+    environment:
+      - APP_ENV=${APP_ENV:-prod}
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MEILISEARCH_HOST=${MEILISEARCH_HOST}
+      - MEILISEARCH_KEY=${MEILISEARCH_KEY}
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL}
+      - DOCUMENTS_STORAGE_PATH=/var/www/html/storage/documents
+      - TEMP_STORAGE_PATH=/var/www/html/storage/temp
+    command: php bin/console messenger:consume async --time-limit=3600 --memory-limit=256M
+    depends_on:
+      - postgres
+      - redis
+      - meilisearch
+      - ocr-service
+    networks:
+      - docvault_network
+    restart: unless-stopped
+
+  # React Frontend Application
+  frontend:
+    image: ghcr.io/private-doc-vault/docvault-frontend:v1.0.0
+    container_name: docvault_frontend
+    volumes:
+      - frontend_dist:/app/dist
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    command: ["tail", "-f", "/dev/null"]
+
+  # Python OCR Service
+  ocr-service:
+    image: ghcr.io/private-doc-vault/docvault-ocr-service:v1.0.0
+    container_name: docvault_ocr
+    working_dir: /app
+    volumes:
+      - ./storage/temp:/app/temp
+      - ./storage/documents:/var/www/html/storage/documents
+      - ./storage/logs/ocr:/app/logs
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=${REDIS_URL}
+      - BACKEND_URL=${BACKEND_URL:-http://nginx}
+      - TESSERACT_LANGUAGES=${TESSERACT_LANGUAGES:-eng,deu,fra,spa,ita,pol}
+      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-1.0}
+      - WORKER_MAX_RETRIES=${WORKER_MAX_RETRIES:-3}
+      - SHARED_STORAGE_PATH=/var/www/html/storage/documents
+      - OCR_WEBHOOK_SECRET=${OCR_WEBHOOK_SECRET}
+    ports:
+      - "8001:8000"
+    depends_on:
+      - redis
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: docvault_postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-docvault}
+      - POSTGRES_USER=${POSTGRES_USER:-docvault}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_INITDB_ARGS=--auth-local=trust
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docvault} -d ${POSTGRES_DB:-docvault}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Caching and Queues
+  redis:
+    image: redis:7-alpine
+    container_name: docvault_redis
+    command: redis-server /usr/local/etc/redis/redis.conf --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Meilisearch for Full-Text Search
+  meilisearch:
+    image: getmeili/meilisearch:v1.6
+    container_name: docvault_meilisearch
+    environment:
+      - MEILI_MASTER_KEY=${MEILISEARCH_KEY}
+      - MEILI_ENV=${MEILI_ENV:-production}
+      - MEILI_LOG_LEVEL=${MEILI_LOG_LEVEL:-INFO}
+      - MEILI_HTTP_ADDR=0.0.0.0:7700
+    volumes:
+      - meilisearch_data:/meili_data
+    ports:
+      - "${MEILISEARCH_PORT:-7700}:7700"
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  meilisearch_data:
+    driver: local
+  frontend_dist:
+    driver: local
+  backend_public:
+    driver: local
+
+networks:
+  docvault_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

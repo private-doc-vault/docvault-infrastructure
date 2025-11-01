@@ -1,0 +1,58 @@
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
+
+# Storage directories (user data, documents, temp files)
+storage/
+logs/
+
+# Docker volumes and data
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Node modules (if any scripts use Node)
+node_modules/
+
+# Python cache (if any scripts use Python)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Test outputs
+test_output/
+coverage/
+.coverage
+
+# Docker override files (user-specific)
+docker-compose.override.yml
+
+# Secrets and certificates
+*.pem
+*.key
+*.crt
+*.p12
+secrets/

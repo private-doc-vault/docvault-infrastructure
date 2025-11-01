@@ -1,0 +1,227 @@
+version: '3.8'
+
+services:
+  # Nginx Web Server - Development Mode
+  nginx:
+    image: nginx:alpine
+    container_name: docvault_nginx_dev
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx-dev.conf:/etc/nginx/nginx.conf:ro
+      - ./storage/documents:/var/www/html/storage/documents
+      - ./services/backend/public:/var/www/html/public
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - docvault_network
+    restart: unless-stopped
+
+  # PHP Backend Application - Development Mode
+  backend:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: docvault_backend_dev
+    working_dir: /var/www/html
+    volumes:
+      - ./services/backend:/var/www/html
+      - ./storage:/var/www/html/storage
+      - backend_vendor:/var/www/html/vendor
+    environment:
+      - APP_ENV=${APP_ENV:-dev}
+      - APP_DEBUG=${APP_DEBUG:-1}
+      - APP_SECRET=${APP_SECRET:-dev-secret-change-in-production}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://docvault:docvault_pass@postgres:5432/docvault}
+      - REDIS_URL=${REDIS_URL:-redis://:redis_pass@redis:6379/0}
+      - MEILISEARCH_HOST=${MEILISEARCH_HOST:-http://meilisearch:7700}
+      - MEILISEARCH_KEY=${MEILISEARCH_KEY:-masterKey}
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://ocr-service:8000}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-%kernel.project_dir%/config/jwt/private.pem}
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY:-%kernel.project_dir%/config/jwt/public.pem}
+      - JWT_PASSPHRASE=${JWT_PASSPHRASE:-dev-passphrase}
+      - DOCUMENTS_STORAGE_PATH=/var/www/html/storage/documents
+      - TEMP_STORAGE_PATH=/var/www/html/storage/temp
+      - OCR_WEBHOOK_SECRET=${OCR_WEBHOOK_SECRET:-dev-webhook-secret-min-32-chars-long}
+    depends_on:
+      - postgres
+      - redis
+      - meilisearch
+    networks:
+      - docvault_network
+    restart: unless-stopped
+
+  # Queue Worker for Background Processing - Development Mode
+  queue-worker:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: docvault_queue_worker_dev
+    working_dir: /var/www/html
+    volumes:
+      - ./services/backend:/var/www/html
+      - ./storage:/var/www/html/storage
+      - backend_vendor:/var/www/html/vendor
+    environment:
+      - APP_ENV=${APP_ENV:-dev}
+      - APP_DEBUG=${APP_DEBUG:-1}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://docvault:docvault_pass@postgres:5432/docvault}
+      - REDIS_URL=${REDIS_URL:-redis://:redis_pass@redis:6379/0}
+      - MEILISEARCH_HOST=${MEILISEARCH_HOST:-http://meilisearch:7700}
+      - MEILISEARCH_KEY=${MEILISEARCH_KEY:-masterKey}
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://ocr-service:8000}
+      - DOCUMENTS_STORAGE_PATH=/var/www/html/storage/documents
+      - TEMP_STORAGE_PATH=/var/www/html/storage/temp
+    command: php bin/console messenger:consume async --time-limit=3600 --memory-limit=256M
+    depends_on:
+      - postgres
+      - redis
+      - meilisearch
+      - ocr-service
+    networks:
+      - docvault_network
+    restart: unless-stopped
+
+  # React Frontend Application - Development Mode (Vite dev server)
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile.dev
+      args:
+        - VITE_API_URL=${VITE_API_URL:-/api}
+        - VITE_APP_VERSION=${VITE_APP_VERSION:-dev}
+    container_name: docvault_frontend_dev
+    working_dir: /app
+    volumes:
+      - ./services/frontend:/app
+      - frontend_node_modules:/app/node_modules
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-/api}
+      - VITE_APP_VERSION=${VITE_APP_VERSION:-dev}
+    ports:
+      - "5173:5173"
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0
+
+  # Python OCR Service - Development Mode
+  ocr-service:
+    build:
+      context: ./services/ocr-service
+      dockerfile: Dockerfile
+    container_name: docvault_ocr_dev
+    working_dir: /app
+    volumes:
+      - ./services/ocr-service:/app
+      - ./storage/temp:/app/temp
+      - ./storage/documents:/var/www/html/storage/documents
+      - ./storage/logs/ocr:/app/logs
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=${REDIS_URL:-redis://:redis_pass@redis:6379/0}
+      - BACKEND_URL=${BACKEND_URL:-http://nginx}
+      - TESSERACT_LANGUAGES=${TESSERACT_LANGUAGES:-eng,deu,fra,spa,ita,pol}
+      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-1.0}
+      - WORKER_MAX_RETRIES=${WORKER_MAX_RETRIES:-3}
+      - SHARED_STORAGE_PATH=/var/www/html/storage/documents
+      - OCR_WEBHOOK_SECRET=${OCR_WEBHOOK_SECRET:-dev-webhook-secret-min-32-chars-long}
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+    ports:
+      - "8001:8000"
+    depends_on:
+      - redis
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: docvault_postgres_dev
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-docvault}
+      - POSTGRES_USER=${POSTGRES_USER:-docvault}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-docvault_pass}
+      - POSTGRES_INITDB_ARGS=--auth-local=trust
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+      - ./postgres/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docvault} -d ${POSTGRES_DB:-docvault}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Caching and Queues
+  redis:
+    image: redis:7-alpine
+    container_name: docvault_redis_dev
+    command: redis-server /usr/local/etc/redis/redis.conf --requirepass ${REDIS_PASSWORD:-redis_pass}
+    volumes:
+      - redis_data_dev:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Meilisearch for Full-Text Search
+  meilisearch:
+    image: getmeili/meilisearch:v1.6
+    container_name: docvault_meilisearch_dev
+    environment:
+      - MEILI_MASTER_KEY=${MEILISEARCH_KEY:-masterKey}
+      - MEILI_ENV=${MEILI_ENV:-development}
+      - MEILI_LOG_LEVEL=${MEILI_LOG_LEVEL:-DEBUG}
+      - MEILI_HTTP_ADDR=0.0.0.0:7700
+    volumes:
+      - meilisearch_data_dev:/meili_data
+    ports:
+      - "${MEILISEARCH_PORT:-7700}:7700"
+    networks:
+      - docvault_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data_dev:
+    driver: local
+  redis_data_dev:
+    driver: local
+  meilisearch_data_dev:
+    driver: local
+  backend_vendor:
+    driver: local
+  frontend_node_modules:
+    driver: local
+
+networks:
+  docvault_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

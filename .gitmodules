@@ -1,0 +1,9 @@
+[submodule "services/backend"]
+	path = services/backend
+	url = git@github.com:private-doc-vault/docvault-backend.git
+[submodule "services/frontend"]
+	path = services/frontend
+	url = git@github.com:private-doc-vault/docvault-frontend.git
+[submodule "services/ocr-service"]
+	path = services/ocr-service
+	url = git@github.com:private-doc-vault/docvault-ocr-service.git
