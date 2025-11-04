@@ -39,7 +39,19 @@ Services are included as git submodules in `services/` directory:
 - `services/frontend/` → docvault-frontend repository
 - `services/ocr-service/` → docvault-ocr-service repository
 
-**Initializing submodules:**
+**Initial Setup:**
+Run the setup script to initialize the environment and install dependencies:
+```bash
+./setup.sh
+```
+The setup script will:
+- Validate Docker installation
+- Initialize git submodules automatically
+- Create required storage directories
+- Setup environment file from .env.example
+- Optionally install all dependencies for development mode (composer, npm, pip)
+
+**Manually initializing submodules:**
 ```bash
 git submodule update --init --recursive
 ```

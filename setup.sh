@@ -168,13 +168,123 @@ main() {
         fi
     done
 
-    # Step 6: Summary and next steps
+    # Step 6: Install dependencies for development mode
+    print_header "Installing Dependencies for Development Mode"
+
+    # Ask user if they want to install dependencies
+    echo ""
+    read -p "Do you want to install dependencies for development mode? (y/n) " -n 1 -r
+    echo ""
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        print_info "Starting dependency installation..."
+        echo ""
+
+        # Build and start base services first
+        print_info "Building and starting infrastructure services..."
+        if docker compose -f docker-compose.dev.yml up -d postgres redis meilisearch 2>&1 | grep -v "attribute.*version.*is obsolete" | grep -v "variable is not set"; then
+            print_success "Infrastructure services started"
+        else
+            print_warning "Some infrastructure services may have issues, continuing..."
+        fi
+
+        echo ""
+        print_info "Waiting for services to be ready (10 seconds)..."
+        sleep 10
+
+        # Install backend dependencies
+        if [ -f "services/backend/composer.json" ]; then
+            print_info "Installing backend dependencies (PHP/Composer)..."
+
+            # Build backend image first
+            if docker compose -f docker-compose.dev.yml build backend 2>&1 | grep -v "attribute.*version.*is obsolete" | grep -v "variable is not set"; then
+                print_success "Backend image built"
+
+                # Start backend temporarily to install dependencies
+                docker compose -f docker-compose.dev.yml up -d backend 2>&1 | grep -v "attribute.*version.*is obsolete" | grep -v "variable is not set"
+
+                echo ""
+                print_info "Running composer install (this may take a few minutes)..."
+                if docker compose -f docker-compose.dev.yml exec -T backend composer install --no-interaction --prefer-dist 2>&1 | tail -5; then
+                    print_success "Backend dependencies installed"
+                else
+                    print_warning "Backend dependency installation had issues, but continuing..."
+                fi
+            else
+                print_warning "Failed to build backend image, skipping dependency installation"
+            fi
+        else
+            print_warning "Backend composer.json not found - skipping"
+        fi
+
+        echo ""
+
+        # Install frontend dependencies
+        if [ -f "services/frontend/package.json" ]; then
+            print_info "Installing frontend dependencies (Node.js/npm)..."
+
+            # Build frontend image
+            if docker compose -f docker-compose.dev.yml build frontend 2>&1 | grep -v "attribute.*version.*is obsolete" | grep -v "variable is not set"; then
+                print_success "Frontend image built"
+
+                # Start frontend temporarily to install dependencies
+                docker compose -f docker-compose.dev.yml up -d frontend 2>&1 | grep -v "attribute.*version.*is obsolete" | grep -v "variable is not set"
+
+                echo ""
+                print_info "Running npm install (this may take a few minutes)..."
+                if docker compose -f docker-compose.dev.yml exec -T frontend npm install 2>&1 | tail -5; then
+                    print_success "Frontend dependencies installed"
+                else
+                    print_warning "Frontend dependency installation had issues, but continuing..."
+                fi
+            else
+                print_warning "Failed to build frontend image, skipping dependency installation"
+            fi
+        else
+            print_warning "Frontend package.json not found - skipping"
+        fi
+
+        echo ""
+
+        # Install OCR service dependencies
+        if [ -f "services/ocr-service/requirements.txt" ]; then
+            print_info "Installing OCR service dependencies (Python/pip)..."
+
+            # Build OCR service image
+            if docker compose -f docker-compose.dev.yml build ocr-service 2>&1 | grep -v "attribute.*version.*is obsolete" | grep -v "variable is not set"; then
+                print_success "OCR service image built"
+
+                # Dependencies are installed during image build, so just verify
+                print_success "OCR service dependencies included in image"
+            else
+                print_warning "Failed to build OCR service image, skipping dependency installation"
+            fi
+        else
+            print_warning "OCR service requirements.txt not found - skipping"
+        fi
+
+        echo ""
+        print_success "Dependency installation complete!"
+
+        # Stop all services
+        print_info "Stopping services..."
+        docker compose -f docker-compose.dev.yml down 2>&1 | grep -v "attribute.*version.*is obsolete" | grep -v "variable is not set" > /dev/null
+        print_success "Services stopped"
+    else
+        print_info "Skipping dependency installation"
+        print_warning "You will need to install dependencies manually before starting containers"
+    fi
+
+    # Step 7: Summary and next steps
     print_header "Setup Complete!"
 
     echo -e "${GREEN}✓${NC} Docker and Docker Compose are installed"
     echo -e "${GREEN}✓${NC} Git submodules initialized"
     echo -e "${GREEN}✓${NC} Storage directories created"
     echo -e "${GREEN}✓${NC} Environment file created"
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${GREEN}✓${NC} Development dependencies installed"
+    fi
     echo ""
 
     print_header "Next Steps"
@@ -183,20 +293,21 @@ main() {
     echo "   ${BLUE}nano .env${NC} or ${BLUE}vim .env${NC}"
     echo ""
     echo "2. For development mode (builds from source):"
-    echo "   ${BLUE}docker-compose -f docker-compose.dev.yml up -d${NC}"
+    echo "   ${BLUE}docker compose -f docker-compose.dev.yml up -d${NC}"
     echo ""
     echo "3. For production mode (uses published images):"
-    echo "   ${BLUE}docker-compose up -d${NC}"
+    echo "   ${BLUE}docker compose up -d${NC}"
     echo ""
     echo "4. Check service status:"
-    echo "   ${BLUE}docker-compose ps${NC}"
+    echo "   ${BLUE}docker compose ps${NC}"
     echo ""
     echo "5. View logs:"
-    echo "   ${BLUE}docker-compose logs -f [service-name]${NC}"
+    echo "   ${BLUE}docker compose logs -f [service-name]${NC}"
     echo ""
     echo "6. Access the application:"
     echo "   - Frontend: ${BLUE}http://localhost${NC}"
     echo "   - Backend API: ${BLUE}http://localhost/api${NC}"
+    echo "   - React Dev Server: ${BLUE}http://localhost:5173${NC}"
     echo "   - Meilisearch: ${BLUE}http://localhost:7700${NC}"
     echo "   - OCR Service: ${BLUE}http://localhost:8001${NC}"
     echo ""
