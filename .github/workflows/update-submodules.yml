@@ -1,0 +1,141 @@
+name: Update Submodules
+
+on:
+  repository_dispatch:
+    types: [service-released]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service name (backend, frontend, ocr-service)'
+        required: true
+        type: choice
+        options:
+          - backend
+          - frontend
+          - ocr-service
+      version:
+        description: 'Version tag (e.g., v1.0.1)'
+        required: true
+        type: string
+
+jobs:
+  update-submodule:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract service and version from event
+        id: extract
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            SERVICE="${{ github.event.client_payload.service }}"
+            VERSION="${{ github.event.client_payload.version }}"
+          else
+            SERVICE="${{ github.event.inputs.service }}"
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+
+          echo "service=$SERVICE" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Service: $SERVICE, Version: $VERSION"
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update submodule to release tag
+        id: update-submodule
+        run: |
+          SERVICE="${{ steps.extract.outputs.service }}"
+          VERSION="${{ steps.extract.outputs.version }}"
+          SUBMODULE_PATH="services/${SERVICE}"
+
+          echo "Updating submodule: $SUBMODULE_PATH to $VERSION"
+
+          # Navigate to submodule directory
+          cd "$SUBMODULE_PATH"
+
+          # Fetch all tags
+          git fetch --tags origin
+
+          # Checkout the specific version tag
+          git checkout "tags/$VERSION"
+
+          # Get the commit hash
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+
+          cd ../..
+
+          # Stage the submodule update
+          git add "$SUBMODULE_PATH"
+
+          # Check if there are changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changes detected"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update docker-compose.yml image tags
+        if: steps.update-submodule.outputs.has_changes == 'true'
+        run: |
+          SERVICE="${{ steps.extract.outputs.service }}"
+          VERSION="${{ steps.extract.outputs.version }}"
+
+          # Update image tag in docker-compose.yml
+          sed -i "s|image: ghcr.io/docvault-app/docvault-${SERVICE}:v[0-9.]*|image: ghcr.io/docvault-app/docvault-${SERVICE}:${VERSION}|g" docker-compose.yml
+
+          # Stage docker-compose.yml changes
+          git add docker-compose.yml
+
+      - name: Create Pull Request
+        if: steps.update-submodule.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: update ${{ steps.extract.outputs.service }} to ${{ steps.extract.outputs.version }}"
+          branch: "update-${{ steps.extract.outputs.service }}-${{ steps.extract.outputs.version }}"
+          delete-branch: true
+          title: "chore: update ${{ steps.extract.outputs.service }} to ${{ steps.extract.outputs.version }}"
+          body: |
+            ## Automated Submodule Update
+
+            This PR updates the **${{ steps.extract.outputs.service }}** service to version **${{ steps.extract.outputs.version }}**.
+
+            ### Changes
+            - Updated `services/${{ steps.extract.outputs.service }}` submodule to ${{ steps.extract.outputs.version }} (commit: ${{ steps.update-submodule.outputs.commit_hash }})
+            - Updated Docker image tag in `docker-compose.yml` to ${{ steps.extract.outputs.version }}
+
+            ### Changelog
+            View the full changelog: https://github.com/docvault-app/docvault-${{ steps.extract.outputs.service }}/releases/tag/${{ steps.extract.outputs.version }}
+
+            ### Manual Approval Required
+            Please review the changes and test the integration before merging. This PR was automatically created by the submodule update workflow.
+
+            ---
+            *This PR was automatically created by the `update-submodules` workflow in response to a new release.*
+          labels: |
+            automated
+            dependencies
+            ${{ steps.extract.outputs.service }}
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.update-submodule.outputs.has_changes }}" = "true" ]; then
+            echo "✅ Pull request created successfully for ${{ steps.extract.outputs.service }} ${{ steps.extract.outputs.version }}"
+          else
+            echo "ℹ️ No changes detected - submodule is already at ${{ steps.extract.outputs.version }}"
+          fi
